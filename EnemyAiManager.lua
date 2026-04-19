@@ -4,15 +4,19 @@ EnemySpawnManager.__index = EnemySpawnManager
 -- setup manager and get folders  
 function EnemySpawnManager.new()
 	local self = setmetatable({}, EnemySpawnManager)
--- References to enemy assets and stages
+
+	-- References to enemy assets and stages
 	self.EnemyFolder = game.ReplicatedFirst:WaitForChild("Main_RS"):WaitForChild("Enemies")
 	self.StagesFolder = workspace:WaitForChild("Stages")
 
-	--enemies spawnPoint
+	-- enemies spawnPoint
 	self.EnemySpawnPoints = workspace:WaitForChild("EnemySpawnPoints"):GetChildren()
 
 	self.EnemySpawnRate = 1
 	self.EnemySpawnDelay = 1
+
+	-- store pathfinding once instead of calling getservice every time
+	self.PathService = game:GetService("PathfindingService")
 
 	self.spawnedEnemies = {}
 	self:StartAutoReset()
@@ -53,8 +57,7 @@ function EnemySpawnManager:IsTargetAttackable(root, targetRoot)
 end
 
 -- StartAutoReset:
--- Periodically resets all enemies every 900 seconds
--- Used to refresh enemy states in long running games (simulators)
+-- resets all enemies every 900 seconds so server doesnt get messy in long runs
 function EnemySpawnManager:StartAutoReset()
 	task.spawn(function()
 		while true do
@@ -132,7 +135,7 @@ function attacks.Boss(_, hum)
 	if hum then hum:TakeDamage(50) end
 end
 
--- hitbox logic to damage the plr
+-- hitbox logic to damage player
 function EnemySpawnManager:AttackState(model, humanoid, targetRoot)
 	if not targetRoot then return end
 
@@ -170,33 +173,32 @@ function EnemySpawnManager:AttackState(model, humanoid, targetRoot)
 	end
 end
 
--- movement using pathfinding (recalculate every cooldown)
-function EnemySpawnManager:MoveState(root, humanoid, targetRoot, pathService, lastTime, cooldown)
+-- movement using pathfinding (now using self.PathService)
+function EnemySpawnManager:MoveState(root, humanoid, targetRoot, lastTime, cooldown)
 	if not targetRoot then return lastTime end
 	if tick() - lastTime >= cooldown then
-		local path = pathService:CreatePath({
-    AgentCanJump = true,
-    AgentRadius = 3,
-    AgentHeight = 6,
-    AgentCanClimb = true,
-    WaypointSpacing = 4,
-    Costs = {
-        -- Materials
-        Water = 20,
-        Neon = 15,
-        Lava = math.huge,
-        Mud = 10,
-        Ice = 8,
-        
-        -- custom labels
-        DangerZone = math.huge,
-        Fire = 50,
-        DeepWater = 100,
-        Sand = 5,
-        Door = 2,
-        Window = 15
-    }
-})
+
+		local path = self.PathService:CreatePath({
+			AgentCanJump = true,
+			AgentRadius = 3,
+			AgentHeight = 6,
+			AgentCanClimb = true,
+			WaypointSpacing = 4,
+			Costs = {
+				Water = 20,
+				Neon = 15,
+				Lava = math.huge,
+				Mud = 10,
+				Ice = 8,
+
+				DangerZone = math.huge,
+				Fire = 50,
+				DeepWater = 100,
+				Sand = 5,
+				Door = 2,
+				Window = 15
+			}
+		})
 
 		local ok = pcall(function()
 			path:ComputeAsync(root.Position, targetRoot.Position)
@@ -210,21 +212,21 @@ function EnemySpawnManager:MoveState(root, humanoid, targetRoot, pathService, la
 				humanoid:MoveTo(nxt.Position)
 			end
 		end
-
 		lastTime = tick()
 	end
 	return lastTime
 end
 
--- switch animations based on current state
--- avoids replaying same animation
+-- animation state handler
 function EnemySpawnManager:AnimationState(model, humanoid, state)
 	if not model or not humanoid then return end
+
 	local anim = humanoid:FindFirstChildOfClass("Animator")
 	if not anim then
 		anim = Instance.new("Animator")
 		anim.Parent = humanoid
 	end
+
 	if model:GetAttribute("CurrentAnimationState") == state then return end
 
 	for _, t in pairs(anim:GetPlayingAnimationTracks()) do
@@ -242,10 +244,7 @@ function EnemySpawnManager:AnimationState(model, humanoid, state)
 	model:SetAttribute("CurrentAnimationState", state)
 end
 
--- EnemyAI:
--- Main loop that controls enemy behavior:
--- - Finds closest valid target
--- - Switches between Idle, Move, and Attack states
+-- main AI loop
 function EnemySpawnManager:EnemyAI(model)
 	local hum = model:FindFirstChild("Humanoid")
 	local root = model:FindFirstChild("HumanoidRootPart")
@@ -253,7 +252,6 @@ function EnemySpawnManager:EnemyAI(model)
 	if not hum or not root then return end
 
 	local players = game:GetService("Players")
-	local pathService = game:GetService("PathfindingService")
 
 	local repathTime = 0.5
 	local lastTime = 0
@@ -261,6 +259,7 @@ function EnemySpawnManager:EnemyAI(model)
 	task.spawn(function()
 		while model.Parent do
 			task.wait(0.2)
+
 			local closestDist = math.huge
 			local tRoot = nil
 
@@ -296,10 +295,10 @@ function EnemySpawnManager:EnemyAI(model)
 			if state == "Attack" then
 				self:AttackState(model, hum, tRoot)
 			elseif state == "Move" then
-				lastTime = self:MoveState(root, hum, tRoot, pathService, lastTime, repathTime)
+				lastTime = self:MoveState(root, hum, tRoot, lastTime, repathTime)
 			end
 		end
 	end)
 end
---done
+
 return EnemySpawnManager
