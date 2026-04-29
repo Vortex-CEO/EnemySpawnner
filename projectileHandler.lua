@@ -1,10 +1,12 @@
+-- this module is the main system for all gun bullets
+-- it handles how bullets move, hit things, and the effects they make
 local projectileHandler = {}
 projectileHandler.__index = projectileHandler
 
 local runService = game:GetService("RunService")
 local debris = game:GetService("Debris")
 
--- types for clarity and strict mode
+-- simple types to keep the data organized
 type weaponType = "Pistol" | "SMG" | "Sniper"
 
 type projectileData = {
@@ -14,76 +16,88 @@ type projectileData = {
 	player: Player
 }
 
--- custom signal class handles internal events
+-- internal signal system to handle hit events easily
 local internalSignal = {}
 internalSignal.__index = internalSignal
 
+-- creates a new table to store all functions that should run on hit
 function internalSignal.new()
 	local self = setmetatable({}, internalSignal)
 	self._activeConnections = {}
 	return self
 end
 
+-- adds a new function to the list of connections to be called later
 function internalSignal:connect(callback)
 	local connection = {callback = callback, isActive = true}
 	table.insert(self._activeConnections, connection)
-	return {disconnect = function() connection.isActive = false end}
+	
+	return {
+		disconnect = function()
+			connection.isActive = false
+		end
+	}
 end
 
+-- loops through the connections list and executes each function using task.spawn
 function internalSignal:fire(...)
 	for i = #self._activeConnections, 1, -1 do
 		local conn = self._activeConnections[i]
 		if conn.isActive then
 			task.spawn(conn.callback, ...)
 		else
+			-- removes broken or disconnected functions from the table
 			table.remove(self._activeConnections, i)
 		end
 	end
 end
 
+-- empties the connections table to stop all signals for this object
 function internalSignal:destroy()
 	self._activeConnections = {}
 end
 
--- projectile class manages movement and collision for a single bullet
+-- the main bullet object setup
 local bulletObj = {}
 bulletObj.__index = bulletObj
 
--- create new projectile instance with specific weapon properties
+-- sets up the bullet data, calculates direction, and starts the object
 function bulletObj.new(data: projectileData)
 	local self = setmetatable({}, bulletObj)
 
-	-- core settings
+	-- assigns all the basic info like player and start position to the object
 	self.user = data.player
 	self.kind = data.bulletType
 	self.spawnPos = data.muzzleRef.WorldPosition
-	self.currentPos = self.spawnPos 
+	self.currentPos = self.spawnPos
 	self.creationTime = os.clock()
 	self.isDead = false
 
-	-- calculate trajectory direction
+	-- calculates the direction by subtracting start point from end point
 	local dirVector = (data.mousePos - self.spawnPos)
 	local lookDir = dirVector.Unit
 
-	-- safety check for zero magnitude
+	-- prevents errors if the magnitude is zero by setting a default up direction
 	if dirVector.Magnitude < 0.001 then
 		lookDir = Vector3.new(0, 1, 0)
 	end
 
-	-- set physical attributes based on type
+	-- assigns specific physics values like speed and gravity based on weapon kind
 	if self.kind == "Sniper" then
 		self.velocityValue = 550
 		self.dropForce = Vector3.new(0, -8, 0)
 		self.pierceCount = 3
 		self.partSize = Vector3.new(0.1, 0.1, 5)
 		self.mainColor = Color3.fromRGB(255, 40, 40)
+
 	elseif self.kind == "SMG" then
 		self.velocityValue = 220
 		self.dropForce = Vector3.new(0, -45, 0)
 		self.pierceCount = 0
 		self.partSize = Vector3.new(0.1, 0.1, 1.8)
 		self.mainColor = Color3.fromRGB(255, 255, 255)
-	else
+
+	else -- standard pistol settings
 		self.velocityValue = 160
 		self.dropForce = Vector3.new(0, -30, 0)
 		self.pierceCount = 0
@@ -94,31 +108,33 @@ function bulletObj.new(data: projectileData)
 	self.currentVelocity = lookDir * self.velocityValue
 	self.onHit = internalSignal.new()
 
-	-- validate shot before rendering
+	-- runs security functions to check if the shot is allowed
 	local canSpawn = self:_runSecurityChecks(data.muzzleRef)
 
 	if canSpawn then
+		-- creates the visual part if the security check passes
 		self:_buildVisuals(lookDir)
 	else
+		-- cleans up the object immediately if the shot is blocked
 		self:remove()
 	end
 
 	return self
 end
 
--- prevent firing through walls or exploit distances
-function bulletObj:_runSecurityChecks(muzzle: Attachment) : boolean
+-- validates the muzzle position and checks for walls near the player
+function bulletObj:_runSecurityChecks(muzzle: Attachment): boolean
 	local char = self.user.Character
 	if not char then return false end
 
-	local root = char:FindFirstChild("HumanoidRootPart") :: BasePart
+	local root = char:FindFirstChild("HumanoidRootPart")
 	if not root then return false end
 
-	-- max distance check between player and gun muzzle
+	-- measures distance between player and gun to prevent reach exploits
 	local gap = (muzzle.WorldPosition - root.Position).Magnitude
 	if gap > 18 then return false end
 
-	-- raycast to ensure player isn't clipping through objects
+	-- uses a raycast to see if the player is trying to shoot through a wall
 	local wallParams = RaycastParams.new()
 	wallParams.FilterType = Enum.RaycastFilterType.Exclude
 	wallParams.FilterDescendantsInstances = {char}
@@ -132,7 +148,7 @@ function bulletObj:_runSecurityChecks(muzzle: Attachment) : boolean
 	return true
 end
 
--- generate projectile visual and align before parenting
+-- creates a new Part and adds a Trail for the bullet visual
 function bulletObj:_buildVisuals(direction: Vector3)
 	local bulletModel = Instance.new("Part")
 	bulletModel.Size = self.partSize
@@ -143,13 +159,14 @@ function bulletObj:_buildVisuals(direction: Vector3)
 	bulletModel.CanQuery = false
 	bulletModel.CastShadow = false
 
-	-- instant cframe placement to prevent origin flicker
+	-- sets the initial position and rotation of the bullet part
 	bulletModel.CFrame = CFrame.new(self.currentPos, self.currentPos + direction)
 	bulletModel.Parent = workspace
 
-	-- visual attachments and trail
+	-- creates attachments and a trail to show the bullet path
 	local startAtt = Instance.new("Attachment", bulletModel)
 	startAtt.Position = Vector3.new(0, self.partSize.Y/2, 0)
+
 	local endAtt = Instance.new("Attachment", bulletModel)
 	endAtt.Position = Vector3.new(0, -self.partSize.Y/2, 0)
 
@@ -163,16 +180,21 @@ function bulletObj:_buildVisuals(direction: Vector3)
 	self.visualPart = bulletModel
 end
 
--- physics step handles motion and collision detection
+-- calculates new position and checks for collisions using Raycast
 function bulletObj:update(dt: number)
 	if self.isDead then return end
-	if os.clock() - self.creationTime > 3.5 then self:remove() return end
+
+	-- stops the bullet if it lives longer than the max time
+	if os.clock() - self.creationTime > 3.5 then
+		self:remove()
+		return
+	end
 
 	local oldPos = self.currentPos
 	local nextVel = self.currentVelocity + (self.dropForce * dt)
 	local moveAmount = (self.currentVelocity + nextVel) * 0.5 * dt
 
-	-- update position with raycast for high speed collision
+	-- fires a ray from old position to the new one to detect hits
 	local castParams = RaycastParams.new()
 	castParams.FilterType = Enum.RaycastFilterType.Exclude
 	castParams.FilterDescendantsInstances = {self.visualPart, self.user.Character}
@@ -180,56 +202,51 @@ function bulletObj:update(dt: number)
 	local hitResult = workspace:Raycast(oldPos, moveAmount, castParams)
 
 	if hitResult then
+		-- handles the hit logic if the ray touches something
 		self:_onCollision(hitResult)
 	else
-		self.currentPos = self.currentPos + moveAmount
+		-- updates the math position if the path is clear
+		self.currentPos += moveAmount
 		self.currentVelocity = nextVel
 	end
 
-	-- update part cframe to follow logical position
+	-- moves the visual part to match the new calculated position
 	if self.visualPart then
 		self.visualPart.CFrame = CFrame.new(self.currentPos, self.currentPos + self.currentVelocity)
 	end
 end
 
--- handles impact logic and specialized penetration
+-- deals damage to humanoids and triggers the hit signal
 function bulletObj:_onCollision(result: RaycastResult)
 	local partHit = result.Instance
 	local modelHit = partHit:FindFirstAncestorOfClass("Model")
 	local targetHuman = modelHit and modelHit:FindFirstChildOfClass("Humanoid")
 
-	-- apply damage if humanoid exists
+	-- applies damage from the table if a humanoid is found
 	if targetHuman and targetHuman.Health > 0 then
-		local damageTable = {
-			Sniper = 80,
-			SMG = 10,
-			Pistol = 25
-		}
-
+		local damageTable = { Sniper = 80, SMG = 10, Pistol = 25 }
 		local finalDmg = damageTable[self.kind] or 20
 		targetHuman:TakeDamage(finalDmg)
 	end
 
-	-- trigger hit event for external systems
+	-- calls the onHit signal functions with the hit data
 	self.onHit:fire(partHit, result.Position, targetHuman)
 
-	-- sniper specific penetration through non-humanoid objects
+	-- handles sniper piercing by decreasing count and continuing movement
 	if self.kind == "Sniper" and self.pierceCount > 0 then
 		if not targetHuman then
-			self.pierceCount = self.pierceCount - 1
+			self.pierceCount -= 1
 			self.currentPos = result.Position + (self.currentVelocity.Unit * 0.6)
 			return
 		end
 	end
 
-	-- visual effect
+	-- creates effects and starts the removal process
 	self:_spawnImpactVFX(result.Position)
-
-	-- destroy projectile
 	self:remove()
 end
 
--- visual particles on collision
+-- spawns a temporary part and emits particles for impact visuals
 function bulletObj:_spawnImpactVFX(pos: Vector3)
 	local vfxAnchor = Instance.new("Part")
 	vfxAnchor.Size = Vector3.new(0.05, 0.05, 0.05)
@@ -245,52 +262,80 @@ function bulletObj:_spawnImpactVFX(pos: Vector3)
 	sparks.Lifetime = NumberRange.new(0.15, 0.35)
 	sparks.Speed = NumberRange.new(6, 12)
 	sparks.Rate = 500
-	sparks:emit(12)
+	sparks:Emit(12)
 
+	-- schedules the vfx part to be destroyed after 0.6 seconds
 	debris:AddItem(vfxAnchor, 0.6)
 end
 
--- clean up projectile and signals
+-- clears memory and destroys instances related to this bullet
 function bulletObj:remove()
 	if self.isDead then return end
 	self.isDead = true
 
-	if self.visualPart then 
-		self.visualPart:Destroy() 
+	if self.visualPart then
+		self.visualPart:Destroy()
 	end
 
 	self.onHit:destroy()
 	setmetatable(self, nil)
 end
 
--- service functions to manage multiple projectiles
+-- a table to keep track of all bullets currently in flight
 local activeBullets = {}
 
--- fire pistol bullet
+-- initializes a new Pistol bullet and adds it to the active table
 function projectileHandler.firePistol(muzzle, target, owner)
-	local b = bulletObj.new({bulletType = "Pistol", muzzleRef = muzzle, mousePos = target, player = owner})
-	if b and not b.isDead then table.insert(activeBullets, b) end
+	local b = bulletObj.new({
+		bulletType = "Pistol",
+		muzzleRef = muzzle,
+		mousePos = target,
+		player = owner
+	})
+
+	if b and not b.isDead then
+		table.insert(activeBullets, b)
+	end
 end
 
--- fire smg bullet
+-- initializes a new SMG bullet and adds it to the active table
 function projectileHandler.fireSMG(muzzle, target, owner)
-	local b = bulletObj.new({bulletType = "SMG", muzzleRef = muzzle, mousePos = target, player = owner})
-	if b and not b.isDead then table.insert(activeBullets, b) end
+	local b = bulletObj.new({
+		bulletType = "SMG",
+		muzzleRef = muzzle,
+		mousePos = target,
+		player = owner
+	})
+
+	if b and not b.isDead then
+		table.insert(activeBullets, b)
+	end
 end
 
--- fire sniper bullet
+-- initializes a new Sniper bullet and adds it to the active table
 function projectileHandler.fireSniper(muzzle, target, owner)
-	local b = bulletObj.new({bulletType = "Sniper", muzzleRef = muzzle, mousePos = target, player = owner})
-	if b and not b.isDead then table.insert(activeBullets, b) end
+	local b = bulletObj.new({
+		bulletType = "Sniper",
+		muzzleRef = muzzle,
+		mousePos = target,
+		player = owner
+	})
+
+	if b and not b.isDead then
+		table.insert(activeBullets, b)
+	end
 end
 
--- core update loop runs every frame
+-- runs the update function for every bullet in the active list every frame
 runService.Heartbeat:Connect(function(dt)
 	for i = #activeBullets, 1, -1 do
 		local b = activeBullets[i]
+
 		if not b or b.isDead then
+			-- removes bullets that are finished from the list
 			table.remove(activeBullets, i)
 		else
+			-- calls the movement and collision update
 			b:update(dt)
 		end
 	end
